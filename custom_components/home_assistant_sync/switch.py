@@ -47,8 +47,28 @@ class SyncedSwitch(EntitySyncEntity, SwitchEntity):
 
     async def async_turn_on(self, **kwargs):
         """Turn the switch on."""
-        await self.coordinator.async_set_entity_state(self._entity_id, state="on")
+        try:
+            await self.coordinator.async_set_entity_state(
+                self._entity_id, 
+                state="on"
+            )
+            # Optimistically update the state
+            if self._entity_data:
+                self._entity_data["state"] = "on"
+                self.async_write_ha_state()
+        except Exception as ex:
+            _LOGGER.error("Failed to turn on %s: %s", self._entity_id, ex)
 
     async def async_turn_off(self, **kwargs):
         """Turn the switch off."""
-        await self.coordinator.async_set_entity_state(self._entity_id, state="off")
+        try:
+            await self.coordinator.async_set_entity_state(
+                self._entity_id, 
+                state="off"
+            )
+            # Optimistically update the state
+            if self._entity_data:
+                self._entity_data["state"] = "off"
+                self.async_write_ha_state()
+        except Exception as ex:
+            _LOGGER.error("Failed to turn off %s: %s", self._entity_id, ex)
