@@ -23,6 +23,9 @@ from .const import (
     API_ENTITIES_PATH,
     API_AUTH_PATH,
     API_CALL_SERVICE_PATH,
+    API_REGISTER_CLIENT_PATH,
+    API_REVOKE_CLIENT_PATH,
+    API_LIST_CLIENTS_PATH,
     WS_TYPE_AUTH,
     WS_TYPE_STATE_CHANGED,
     WS_TYPE_SUBSCRIBE,
@@ -33,8 +36,11 @@ from .const import (
     ATTR_SERVICE,
     ATTR_SERVICE_DATA,
     ATTR_DOMAIN,
+    ATTR_CLIENT_ID,
+    ATTR_CLIENT_NAME,
+    ATTR_TOKEN,
 )
-from .auth import verify_jwt_token
+from .auth import ClientTokenManager
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -49,15 +55,22 @@ class EntitySyncServer:
         self.jwt_secret = entry.data.get(CONF_JWT_SECRET)
         self.clients: Set[web.WebSocketResponse] = set()
         self._views_registered = False
+        self._token_manager = ClientTokenManager(hass, self.jwt_secret)
 
     async def async_setup(self):
         """Set up the server."""
+        # Load client tokens from storage
+        await self._token_manager.async_load()
+        
         # Register HTTP views
         if not self._views_registered:
             self.hass.http.register_view(EntitySyncAuthView(self))
             self.hass.http.register_view(EntitySyncEntitiesView(self))
             self.hass.http.register_view(EntitySyncWebSocketView(self))
             self.hass.http.register_view(EntitySyncCallServiceView(self))
+            self.hass.http.register_view(EntitySyncRegisterClientView(self))
+            self.hass.http.register_view(EntitySyncRevokeClientView(self))
+            self.hass.http.register_view(EntitySyncListClientsView(self))
             self._views_registered = True
         
         _LOGGER.info("Home Assistant Sync Server started")
@@ -72,8 +85,20 @@ class EntitySyncServer:
 
     def verify_client_token(self, token: str) -> bool:
         """Verify client JWT token."""
-        payload = verify_jwt_token(token, self.jwt_secret)
+        payload = self._token_manager.verify_token(token)
         return payload is not None
+
+    async def async_register_client(self, client_name: str) -> Dict[str, str]:
+        """Register a new client."""
+        return await self._token_manager.async_register_client(client_name)
+
+    async def async_revoke_client(self, client_id: str) -> bool:
+        """Revoke a client's access."""
+        return await self._token_manager.async_revoke_client(client_id)
+
+    def get_clients(self) -> Dict[str, dict]:
+        """Get all registered clients."""
+        return self._token_manager.get_clients()
 
     def get_exposed_entities(self):
         """Get list of exposed entities."""
@@ -334,6 +359,125 @@ class EntitySyncCallServiceView(HomeAssistantView):
                 "success": False,
                 "error": str(ex)
             }, status=500)
+
+
+class EntitySyncRegisterClientView(HomeAssistantView):
+    """View to register a new client."""
+
+    url = API_REGISTER_CLIENT_PATH
+    name = f"api:{DOMAIN}:register_client"
+    requires_auth = False
+
+    def __init__(self, server: EntitySyncServer):
+        """Initialize the view."""
+        self.server = server
+
+    async def post(self, request):
+        """Handle POST request."""
+        auth_header = request.headers.get("Authorization", "")
+        if not auth_header.startswith("Bearer "):
+            return web.Response(status=401, text="Unauthorized")
+
+        # Verify the JWT secret (basic auth for registration)
+        token = auth_header[7:]
+        from .auth import verify_jwt_token
+        payload = verify_jwt_token(token, self.server.jwt_secret)
+        
+        if not payload:
+            return web.Response(status=401, text="Invalid token")
+
+        try:
+            data = await request.json()
+            client_name = data.get(ATTR_CLIENT_NAME, "Unknown Client")
+
+            client_data = await self.server.async_register_client(client_name)
+            
+            return web.json_response(client_data)
+
+        except Exception as ex:
+            _LOGGER.error("Error registering client: %s", ex)
+            return web.json_response({
+                "success": False,
+                "error": str(ex)
+            }, status=500)
+
+
+class EntitySyncRevokeClientView(HomeAssistantView):
+    """View to revoke a client."""
+
+    url = API_REVOKE_CLIENT_PATH
+    name = f"api:{DOMAIN}:revoke_client"
+    requires_auth = False
+
+    def __init__(self, server: EntitySyncServer):
+        """Initialize the view."""
+        self.server = server
+
+    async def post(self, request):
+        """Handle POST request."""
+        auth_header = request.headers.get("Authorization", "")
+        if not auth_header.startswith("Bearer "):
+            return web.Response(status=401, text="Unauthorized")
+
+        token = auth_header[7:]
+        if not self.server.verify_client_token(token):
+            return web.Response(status=401, text="Invalid token")
+
+        try:
+            data = await request.json()
+            client_id = data.get(ATTR_CLIENT_ID)
+
+            success = await self.server.async_revoke_client(client_id)
+            
+            if success:
+                return web.json_response({"success": True})
+            else:
+                return web.json_response({
+                    "success": False,
+                    "error": "Client not found"
+                }, status=404)
+
+        except Exception as ex:
+            _LOGGER.error("Error revoking client: %s", ex)
+            return web.json_response({
+                "success": False,
+                "error": str(ex)
+            }, status=500)
+
+
+class EntitySyncListClientsView(HomeAssistantView):
+    """View to list all clients."""
+
+    url = API_LIST_CLIENTS_PATH
+    name = f"api:{DOMAIN}:list_clients"
+    requires_auth = False
+
+    def __init__(self, server: EntitySyncServer):
+        """Initialize the view."""
+        self.server = server
+
+    async def get(self, request):
+        """Handle GET request."""
+        auth_header = request.headers.get("Authorization", "")
+        if not auth_header.startswith("Bearer "):
+            return web.Response(status=401, text="Unauthorized")
+
+        token = auth_header[7:]
+        if not self.server.verify_client_token(token):
+            return web.Response(status=401, text="Invalid token")
+
+        clients = self.server.get_clients()
+        
+        # Remove token from response for security
+        safe_clients = {}
+        for client_id, client_data in clients.items():
+            safe_clients[client_id] = {
+                ATTR_CLIENT_ID: client_data[ATTR_CLIENT_ID],
+                ATTR_CLIENT_NAME: client_data[ATTR_CLIENT_NAME],
+                ATTR_CREATED_AT: client_data[ATTR_CREATED_AT],
+            }
+        
+        return web.json_response({"clients": safe_clients})
 
 
 class EntitySyncWebSocketView(HomeAssistantView):

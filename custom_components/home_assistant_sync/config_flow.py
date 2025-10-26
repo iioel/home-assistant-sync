@@ -1,6 +1,7 @@
 """Config flow for Home Assistant Sync integration."""
 import logging
 from typing import Any
+import aiohttp
 
 import voluptuous as vol
 from homeassistant import config_entries
@@ -14,12 +15,16 @@ from .const import (
     CONF_SERVER_URL,
     CONF_ACCESS_TOKEN,
     CONF_JWT_SECRET,
+    CONF_CLIENT_TOKEN,
+    CONF_CLIENT_NAME,
     CONF_EXPOSED_ENTITIES,
     CONF_IMPORTED_ENTITIES,
     MODE_SERVER,
     MODE_CLIENT,
+    API_REGISTER_CLIENT_PATH,
+    ATTR_CLIENT_NAME,
+    ATTR_TOKEN,
 )
-from .auth import validate_server_connection
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -87,7 +92,7 @@ class HomeAssistantSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             errors=errors,
             description_placeholders={
                 "info": "Configure the JWT secret for secure authentication. "
-                       "Clients will need this secret to connect."
+                       "This will be used to sign tokens for clients."
             },
         )
 
@@ -98,30 +103,43 @@ class HomeAssistantSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         if user_input is not None:
             server_url = user_input[CONF_SERVER_URL]
             jwt_secret = user_input[CONF_JWT_SECRET]
+            client_name = user_input.get(CONF_CLIENT_NAME, f"Client_{self.hass.config.location_name}")
 
-            # Validate connection to server
+            # Register client with server
             try:
-                is_valid = await validate_server_connection(
-                    self.hass, server_url, jwt_secret
+                token_data = await self._register_with_server(
+                    server_url,
+                    jwt_secret,
+                    client_name
                 )
-                if not is_valid:
-                    errors["base"] = "cannot_connect"
-            except Exception as ex:
-                _LOGGER.error("Error validating server connection: %s", ex)
-                errors["base"] = "cannot_connect"
-
-            if not errors:
-                self._data[CONF_SERVER_URL] = server_url
-                self._data[CONF_JWT_SECRET] = jwt_secret
                 
-                return self.async_create_entry(
-                    title=f"Home Assistant Sync Client ({server_url})",
-                    data=self._data,
-                )
+                if token_data:
+                    self._data[CONF_SERVER_URL] = server_url
+                    self._data[CONF_JWT_SECRET] = jwt_secret
+                    self._data[CONF_CLIENT_TOKEN] = token_data[ATTR_TOKEN]
+                    self._data[CONF_CLIENT_NAME] = client_name
+                    
+                    return self.async_create_entry(
+                        title=f"Home Assistant Sync Client ({client_name})",
+                        data=self._data,
+                    )
+                else:
+                    errors["base"] = "cannot_register"
+                    
+            except aiohttp.ClientError as ex:
+                _LOGGER.error("Connection error during registration: %s", ex)
+                errors["base"] = "cannot_connect"
+            except Exception as ex:
+                _LOGGER.error("Unexpected error during registration: %s", ex)
+                errors["base"] = "unknown"
 
         data_schema = vol.Schema({
             vol.Required(CONF_SERVER_URL): cv.string,
             vol.Required(CONF_JWT_SECRET): cv.string,
+            vol.Optional(
+                CONF_CLIENT_NAME, 
+                default=f"Client_{self.hass.config.location_name}"
+            ): cv.string,
         })
 
         return self.async_show_form(
@@ -129,10 +147,56 @@ class HomeAssistantSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             data_schema=data_schema,
             errors=errors,
             description_placeholders={
-                "info": "Enter the server URL (e.g., http://192.168.1.100:8123) "
-                       "and the JWT secret provided by the server."
+                "info": "Enter the server URL (e.g., http://192.168.1.100:8123), "
+                       "the JWT secret from the server, and a name for this client."
             },
         )
+
+    async def _register_with_server(
+        self,
+        server_url: str,
+        jwt_secret: str,
+        client_name: str
+    ) -> dict:
+        """Register this client with the server."""
+        try:
+            url = f"{server_url.rstrip('/')}{API_REGISTER_CLIENT_PATH}"
+            
+            # Create a temporary token for registration
+            from .auth import generate_jwt_token
+            temp_token = generate_jwt_token(jwt_secret, "registration")
+            
+            headers = {
+                "Authorization": f"Bearer {temp_token}",
+                "Content-Type": "application/json",
+            }
+            
+            payload = {ATTR_CLIENT_NAME: client_name}
+            
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    url,
+                    json=payload,
+                    headers=headers,
+                    timeout=10
+                ) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        _LOGGER.info(
+                            "Successfully registered with server: %s",
+                            client_name
+                        )
+                        return data
+                    else:
+                        _LOGGER.error(
+                            "Registration failed with status: %s",
+                            response.status
+                        )
+                        return None
+                        
+        except Exception as ex:
+            _LOGGER.error("Error during registration: %s", ex)
+            raise
 
     @staticmethod
     @callback

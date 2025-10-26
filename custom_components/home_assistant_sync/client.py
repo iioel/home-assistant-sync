@@ -12,6 +12,7 @@ from homeassistant.config_entries import ConfigEntry
 from .const import (
     CONF_SERVER_URL,
     CONF_JWT_SECRET,
+    CONF_CLIENT_TOKEN,
     CONF_IMPORTED_ENTITIES,
     API_WEBSOCKET_PATH,
     API_ENTITIES_PATH,
@@ -27,7 +28,6 @@ from .const import (
     ATTR_SERVICE_DATA,
     ATTR_DOMAIN,
 )
-from .auth import generate_jwt_token
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -41,6 +41,7 @@ class EntitySyncClient:
         self.entry = entry
         self.server_url = entry.data.get(CONF_SERVER_URL)
         self.jwt_secret = entry.data.get(CONF_JWT_SECRET)
+        self.client_token = entry.data.get(CONF_CLIENT_TOKEN)
         self._ws = None
         self._session = None
         self._entity_states: Dict[str, dict] = {}
@@ -86,11 +87,10 @@ class EntitySyncClient:
             
             self._ws = await self._session.ws_connect(url)
             
-            # Authenticate
-            token = generate_jwt_token(self.jwt_secret, f"client_{self.entry.entry_id}")
+            # Authenticate with client token
             await self._ws.send_json({
                 "type": WS_TYPE_AUTH,
-                "token": token,
+                "token": self.client_token,
             })
             
             # Wait for auth response
@@ -182,8 +182,7 @@ class EntitySyncClient:
         """Get available entities from server."""
         try:
             url = f"{self.server_url.rstrip('/')}{API_ENTITIES_PATH}"
-            token = generate_jwt_token(self.jwt_secret, f"client_{self.entry.entry_id}")
-            headers = {"Authorization": f"Bearer {token}"}
+            headers = {"Authorization": f"Bearer {self.client_token}"}
             
             async with self._session.get(url, headers=headers, timeout=10) as response:
                 if response.status == 200:
@@ -239,11 +238,7 @@ class EntitySyncClient:
             # Fallback to HTTP POST
             try:
                 url = f"{self.server_url.rstrip('/')}{API_CALL_SERVICE_PATH}"
-                token = generate_jwt_token(
-                    self.jwt_secret, 
-                    f"client_{self.entry.entry_id}"
-                )
-                headers = {"Authorization": f"Bearer {token}"}
+                headers = {"Authorization": f"Bearer {self.client_token}"}
                 
                 payload = {
                     ATTR_DOMAIN: domain,
