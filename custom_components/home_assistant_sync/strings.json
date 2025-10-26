@@ -1,0 +1,55 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Configure Home Assistant Sync",
+        "description": "Select the mode for this instance",
+        "data": {
+          "mode": "Mode"
+        }
+      },
+      "server": {
+        "title": "Server Configuration",
+        "description": "Configure the JWT secret for secure authentication. Clients will need this secret to connect.",
+        "data": {
+          "jwt_secret": "JWT Secret"
+        }
+      },
+      "client": {
+        "title": "Client Configuration",
+        "description": "Enter the server URL (e.g., http://192.168.1.100:8123) and the JWT secret provided by the server.",
+        "data": {
+          "server_url": "Server URL",
+          "jwt_secret": "JWT Secret"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Failed to connect to the server. Please check the URL and JWT secret."
+    },
+    "abort": {
+      "already_configured": "This integration is already configured"
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Configure Options"
+      },
+      "server_options": {
+        "title": "Server Options",
+        "description": "Select which entities to expose to clients.",
+        "data": {
+          "exposed_entities": "Exposed Entities"
+        }
+      },
+      "client_options": {
+        "title": "Client Options",
+        "description": "Select which entities to import from the server.",
+        "data": {
+          "imported_entities": "Imported Entities"
+        }
+      }
+    }
+  }
+}
